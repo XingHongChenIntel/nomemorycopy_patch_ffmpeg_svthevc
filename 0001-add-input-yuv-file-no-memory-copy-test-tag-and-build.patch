@@ -1,0 +1,449 @@
+From bc4cdb65937ed8ce68db31f7569131766554878c Mon Sep 17 00:00:00 2001
+From: chandlerbingbing <327269655@qq.com>
+Date: Tue, 22 Oct 2019 12:58:22 +0800
+Subject: [PATCH] add input yuv file no memory copy test tag, and build no
+ memeory copy for 8bits input yuv file.
+
+Signed-off-by: chandlerbingbing <327269655@qq.com>
+---
+ Source/API/EbApi.h                         |  11 +-
+ Source/App/EbAppConfig.c                   |   5 +-
+ Source/App/EbAppConfig.h                   |   8 +
+ Source/App/EbAppContext.c                  |  15 +-
+ Source/App/EbAppProcessCmd.c               | 161 ++++++++++++++++++++-
+ Source/Lib/Codec/EbEncHandle.c             |  43 +++++-
+ Source/Lib/Codec/EbPictureBufferDesc.h     |   3 +-
+ Source/Lib/Codec/EbRateControlProcess.c    |   4 +
+ Source/Lib/Codec/EbSystemResourceManager.c |   2 +-
+ 9 files changed, 229 insertions(+), 23 deletions(-)
+
+diff --git a/Source/API/EbApi.h b/Source/API/EbApi.h
+index 597d7fe..ae922b4 100644
+--- a/Source/API/EbApi.h
++++ b/Source/API/EbApi.h
+@@ -72,6 +72,11 @@ extern "C" {
+         uint32_t naluPayloadType;
+         uint8_t* naluBase64Encode;
+ 
++        //padding test
++        uint8_t  padding_test;
++        uint8_t  count;
++        uint8_t  *pBufferpool[100];
++        uint32_t fileset;
+     } EB_BUFFERHEADERTYPE;
+ 
+     typedef struct EB_COMPONENTTYPE
+@@ -130,7 +135,7 @@ typedef struct EB_H265_ENC_INPUT
+     uint8_t *lumaExt;
+     uint8_t *cbExt;
+     uint8_t *crExt;
+-
++    int *unref_tag;
+     uint32_t yStride;
+     uint32_t crStride;
+     uint32_t cbStride;
+@@ -243,13 +248,13 @@ typedef struct EB_H265_ENC_CONFIGURATION
+      * Default is 25. */
+     uint32_t                frameRate;
+ 
+-    /* Frame rate numerator. When zero, the encoder will use –fps if
++    /* Frame rate numerator. When zero, the encoder will use ï¿½fps if
+      * FrameRateDenominator is also zero, otherwise an error is returned.
+      *
+      * Default is 0. */
+     int32_t                 frameRateNumerator;
+ 
+-    /* Frame rate denominator. When zero, the encoder will use –fps if
++    /* Frame rate denominator. When zero, the encoder will use ï¿½fps if
+      * FrameRateNumerator is also zero, otherwise an error is returned.
+      *
+      * Default is 0. */
+diff --git a/Source/App/EbAppConfig.c b/Source/App/EbAppConfig.c
+index bd637f8..f884366 100644
+--- a/Source/App/EbAppConfig.c
++++ b/Source/App/EbAppConfig.c
+@@ -1135,7 +1135,10 @@ int32_t ComputeFramesToBeEncoded(
+         fseeko64(config->inputFile, currLoc, SEEK_SET); // seek back to that location
+     }
+ 
+-    frameSize = config->inputPaddedWidth * config->inputPaddedHeight; // Luma
++    if(Padding_test)
++        frameSize = config->sourceWidth * config->sourceHeight; // Luma
++    else
++        frameSize = config->inputPaddedWidth * config->inputPaddedHeight; // Luma
+     frameSize += 2 * (frameSize >> (3 - config->encoderColorFormat)); // Add Chroma
+     frameSize = frameSize << ((config->encoderBitDepth == 10) ? 1 : 0);
+ 
+diff --git a/Source/App/EbAppConfig.h b/Source/App/EbAppConfig.h
+index d4bbbac..5d4eb5b 100644
+--- a/Source/App/EbAppConfig.h
++++ b/Source/App/EbAppConfig.h
+@@ -187,10 +187,18 @@ extern rsize_t strnlen_ss(const char *s, rsize_t smax);
+ /****************************************
+ * Padding
+ ****************************************/
++#define Padding_test 1
++#if Padding_test
++#define LEFT_INPUT_PADDING 68
++#define RIGHT_INPUT_PADDING 68
++#define TOP_INPUT_PADDING 68
++#define BOTTOM_INPUT_PADDING 68
++#else
+ #define LEFT_INPUT_PADDING 0
+ #define RIGHT_INPUT_PADDING 0
+ #define TOP_INPUT_PADDING 0
+ #define BOTTOM_INPUT_PADDING 0
++#endif
+ 
+ 
+ typedef struct EbPerformanceContext_s {
+diff --git a/Source/App/EbAppContext.c b/Source/App/EbAppContext.c
+index d9dca86..a3197ff 100644
+--- a/Source/App/EbAppContext.c
++++ b/Source/App/EbAppContext.c
+@@ -305,6 +305,8 @@ EB_ERRORTYPE AllocateInputBuffer(
+     inputPtr->yStride = config->inputPaddedWidth;
+     inputPtr->crStride = config->inputPaddedWidth >> subWidthCMinus1;
+     inputPtr->cbStride = config->inputPaddedWidth >> subWidthCMinus1;
++    inputPtr->unref_tag = (int*)malloc(sizeof(int));
++    *inputPtr->unref_tag = 0;
+     if (luma8bitSize) {
+         EB_APP_MALLOC(uint8_t*, inputPtr->luma, luma8bitSize, EB_N_PTR, EB_ErrorInsufficientResources);
+     }
+@@ -365,15 +367,20 @@ EB_ERRORTYPE AllocateInputBuffers(
+ 
+         // Initialize Header
+         callbackData->inputBufferPool->nSize                       = sizeof(EB_BUFFERHEADERTYPE);
+-
++        callbackData->inputBufferPool->padding_test = Padding_test;
+         EB_APP_MALLOC(uint8_t*, callbackData->inputBufferPool->pBuffer, sizeof(EB_H265_ENC_INPUT), EB_N_PTR, EB_ErrorInsufficientResources);
+-
++        for(int i=0;i<100;i++){
++            EB_APP_MALLOC(uint8_t*, callbackData->inputBufferPool->pBufferpool[i], sizeof(EB_H265_ENC_INPUT), EB_N_PTR, EB_ErrorInsufficientResources);
++        }
+         if (config->bufferedInput == -1) {
+-
+-            // Allocate frame buffer for the pBuffer
+             AllocateInputBuffer(
+                     config,
+                     callbackData->inputBufferPool->pBuffer);
++            for(int i=0;i<100;i++){
++                AllocateInputBuffer(
++                        config,
++                        callbackData->inputBufferPool->pBufferpool[i]);
++            }
+         }
+ 
+         // Assign the variables
+diff --git a/Source/App/EbAppProcessCmd.c b/Source/App/EbAppProcessCmd.c
+index 7a6e1df..6a6b2cc 100644
+--- a/Source/App/EbAppProcessCmd.c
++++ b/Source/App/EbAppProcessCmd.c
+@@ -27,6 +27,10 @@
+     ( (((width)*(height)) + 2*(((width)*(height))>>(3-csp)) )<<is16bit)
+ extern volatile int32_t keepRunning;
+ 
++EB_ERRORTYPE FlushFrameBuffer(
++        EbConfig_t          *config,
++        uint8_t               *pBuffer);
++
+ /***************************************
+ * Process Error Log
+ ***************************************/
+@@ -765,7 +769,32 @@ static void ReadInputFrames(
+     const uint32_t  inputPaddedHeight = config->inputPaddedHeight;
+     FILE   *inputFile = config->inputFile;
+ 	uint8_t  *ebInputPtr;
+-    EB_H265_ENC_INPUT* inputPtr = (EB_H265_ENC_INPUT*)headerPtr->pBuffer;
++    EB_H265_ENC_INPUT* inputPtr = NULL;
++	if(Padding_test){
++        while(1){
++            for(int buf_id=0;buf_id<100;buf_id++){
++                EB_H265_ENC_INPUT* tempPtr = (EB_H265_ENC_INPUT*)(headerPtr->pBufferpool[buf_id]);
++                if(*(tempPtr->unref_tag)==0){
++                    inputPtr = tempPtr;
++                    *tempPtr->unref_tag = 1;
++                    printf("the buf_id is %d\n",buf_id);
++                    break;
++                }else if(*(tempPtr->unref_tag)==2){
++                    *tempPtr->unref_tag = 0;
++                }
++            }
++            if(inputPtr){
++                break;
++            }
++        }
++        headerPtr->pBuffer = (uint8_t*)inputPtr;
++//	    inputPtr = (EB_H265_ENC_INPUT*)(headerPtr->pBuffer);
++//            (headerPtr->count)++;
++	}else{
++            inputPtr = (EB_H265_ENC_INPUT*)headerPtr->pBuffer;
++	}
++    uint32_t fileoffset = headerPtr->fileset;
++
+     const EB_COLOR_FORMAT colorFormat = (EB_COLOR_FORMAT)config->encoderColorFormat;
+     const uint8_t subWidthCMinus1 = (colorFormat == EB_YUV444 ? 1 : 2) - 1;
+     const uint8_t subHeightCMinus1 = (colorFormat >= EB_YUV422 ? 1 : 2) - 1;
+@@ -821,6 +850,10 @@ static void ReadInputFrames(
+                     read_y4m_frame_delimiter(config);
+                 const uint32_t lumaReadSize = inputPaddedWidth * inputPaddedHeight << is16bit;
+                 ebInputPtr = inputPtr->luma;
++                uint32_t LumaBufferOffset = inputPtr->yStride * TOP_INPUT_PADDING + LEFT_INPUT_PADDING;
++                uint32_t LumaStride = inputPtr->yStride;
++                uint32_t SourceHeight = config->sourceHeight;
++                uint32_t SourceWidth = config->sourceWidth;
+                 if (config->y4m_input == EB_FALSE && config->processedFrameCount == 0 && config->inputFile == stdin) {
+                     /* if not a y4m file and input is read from stdin, 9 bytes were already read when checking
+                        or the YUV4MPEG2 string in the stream, so copy those bytes over */
+@@ -830,11 +863,51 @@ static void ReadInputFrames(
+                     headerPtr->nFilledLen += (uint32_t)fread(ebInputPtr, 1, lumaReadSize - YUV4MPEG2_IND_SIZE, inputFile);
+                 }
+                 else {
+-                    headerPtr->nFilledLen += (uint32_t)fread(inputPtr->luma, 1, lumaReadSize, inputFile);
++                    //TODO read data to padding buffer, buffer have offset, file don't have ,but control read size
++                    if(Padding_test){
++                        for(uint32_t inputRowIndex = (uint32_t)0; inputRowIndex < SourceHeight; inputRowIndex++){
++                            fseek(inputFile, inputRowIndex * SourceWidth, fileoffset);
++                            uint8_t * tail = inputPtr->luma + LumaBufferOffset + LumaStride * inputRowIndex;
++                            headerPtr->nFilledLen += (uint32_t)fread(tail, 1, SourceWidth, inputFile);
++                        }
++                        headerPtr->nFilledLen += inputPtr->yStride*TOP_INPUT_PADDING*2 + config->sourceHeight*LEFT_INPUT_PADDING*2;
++                    }else{
++                        headerPtr->nFilledLen += (uint32_t)fread(inputPtr->luma, 1, lumaReadSize, inputFile);
++                    }
+                 }
+                 const uint32_t chromaReadSize = lumaReadSize >> (3 - colorFormat);
+-                headerPtr->nFilledLen += (uint32_t)fread(inputPtr->cb, 1, chromaReadSize, inputFile);
+-                headerPtr->nFilledLen += (uint32_t)fread(inputPtr->cr, 1, chromaReadSize, inputFile);
++                uint32_t ChromaBufferOffset = inputPtr->cbStride * (TOP_INPUT_PADDING>>subHeightCMinus1)
++                                              + (LEFT_INPUT_PADDING>>subWidthCMinus1);
++                uint32_t ChromaStride = inputPtr->cbStride;
++                uint32_t ChromaPaddingSize = ChromaStride*(TOP_INPUT_PADDING>>subHeightCMinus1)*2
++                                             + (SourceHeight>>subHeightCMinus1)*(LEFT_INPUT_PADDING>>subWidthCMinus1)*2;
++                if(Padding_test){
++                    uint32_t CbFileOffset = ftell(inputFile);
++                    for(uint32_t inputRowIndex = (uint32_t)0; inputRowIndex < SourceHeight>>subHeightCMinus1; inputRowIndex++){
++                        fseek(inputFile, inputRowIndex * SourceWidth>>subWidthCMinus1, CbFileOffset);
++                        uint8_t * tail = inputPtr->cb + ChromaBufferOffset + ChromaStride * inputRowIndex;
++                        headerPtr->nFilledLen += (uint32_t)fread(tail, 1, SourceWidth>>subWidthCMinus1, inputFile);
++                    }
++                    headerPtr->nFilledLen += ChromaPaddingSize;
++                }else{
++                    headerPtr->nFilledLen += (uint32_t)fread(inputPtr->cb, 1, chromaReadSize, inputFile);
++                }
++
++                if(Padding_test){
++                    uint32_t CrFileOffset = ftell(inputFile);
++                    for(uint32_t inputRowIndex = (uint32_t)0; inputRowIndex < SourceHeight>>subHeightCMinus1; inputRowIndex++){
++                        fseek(inputFile, inputRowIndex * SourceWidth>>subWidthCMinus1, CrFileOffset);
++                        uint8_t * tail = inputPtr->cr + ChromaBufferOffset + ChromaStride * inputRowIndex;
++                        headerPtr->nFilledLen += (uint32_t)fread(tail, 1, SourceWidth>>subWidthCMinus1, inputFile);
++                    }
++                    headerPtr->nFilledLen += ChromaPaddingSize;
++                }else{
++                    headerPtr->nFilledLen += (uint32_t)fread(inputPtr->cr, 1, chromaReadSize, inputFile);
++                }
++
++                if(Padding_test){
++                    headerPtr->fileset = ftell(inputFile);
++                }
+ 
+                 if (readSize != headerPtr->nFilledLen) {
+ 
+@@ -1194,7 +1267,9 @@ APPEXITCONDITIONTYPE ProcessInputBuffer(EbConfig_t *config, EbAppContext_t *appC
+             EbH265EncSendPicture(componentHandle, headerPtr);
+ 
+         }
+-
++        if(Padding_test && config->framesEncoded != config->framesToBeEncoded)
++            FlushFrameBuffer(config,headerPtr->pBuffer);
++        
+         return_value = (headerPtr->nFlags == EB_BUFFERFLAG_EOS) ? APP_ExitConditionFinished : return_value;
+ 
+     }
+@@ -1355,3 +1430,79 @@ APPEXITCONDITIONTYPE ProcessOutputReconBuffer(
+     }
+     return return_value;
+ }
++EB_ERRORTYPE FlushFrameBuffer(
++        EbConfig_t          *config,
++        uint8_t               *pBuffer)
++{
++    EB_ERRORTYPE   return_error = EB_ErrorNone;
++
++    const int32_t tenBitPackedMode = (config->encoderBitDepth > 8) && (config->compressedTenBitFormat == 0) ? 1 : 0;
++    const EB_COLOR_FORMAT colorFormat = (EB_COLOR_FORMAT)config->encoderColorFormat;    // Chroma subsampling
++    const uint8_t subWidthCMinus1 = (colorFormat == EB_YUV444 ? 1 : 2) - 1;
++
++    // Determine size of each plane
++    const size_t luma8bitSize =
++
++            config->inputPaddedWidth    *
++            config->inputPaddedHeight   *
++
++            (1 << tenBitPackedMode);
++
++    const size_t chroma8bitSize = luma8bitSize >> (3 - colorFormat);
++    const size_t luma10bitSize = (config->encoderBitDepth > 8 && tenBitPackedMode == 0) ? luma8bitSize : 0;
++    const size_t chroma10bitSize = (config->encoderBitDepth > 8 && tenBitPackedMode == 0) ? chroma8bitSize : 0;
++
++    // Determine
++    EB_H265_ENC_INPUT* inputPtr = (EB_H265_ENC_INPUT*)pBuffer;
++    inputPtr->yStride = config->inputPaddedWidth;
++    inputPtr->crStride = config->inputPaddedWidth >> subWidthCMinus1;
++    inputPtr->cbStride = config->inputPaddedWidth >> subWidthCMinus1;
++    if (luma8bitSize) {
++        EB_APP_MALLOC(uint8_t*, inputPtr->luma, luma8bitSize, EB_N_PTR, EB_ErrorInsufficientResources);
++    }
++    else {
++        inputPtr->luma = 0;
++    }
++    if (chroma8bitSize) {
++        EB_APP_MALLOC(uint8_t*, inputPtr->cb, chroma8bitSize, EB_N_PTR, EB_ErrorInsufficientResources);
++    }
++    else {
++        inputPtr->cb = 0;
++    }
++
++    if (chroma8bitSize) {
++        EB_APP_MALLOC(uint8_t*, inputPtr->cr, chroma8bitSize, EB_N_PTR, EB_ErrorInsufficientResources);
++    }
++    else {
++        inputPtr->cr = 0;
++    }
++
++    if (luma10bitSize) {
++        EB_APP_MALLOC(uint8_t*, inputPtr->lumaExt, luma10bitSize, EB_N_PTR, EB_ErrorInsufficientResources);
++    }
++    else {
++        inputPtr->lumaExt = 0;
++    }
++
++    if (chroma10bitSize) {
++        EB_APP_MALLOC(uint8_t*, inputPtr->cbExt, chroma10bitSize, EB_N_PTR, EB_ErrorInsufficientResources);
++    }
++    else {
++        inputPtr->cbExt = 0;
++    }
++
++    if (chroma10bitSize) {
++        EB_APP_MALLOC(uint8_t*, inputPtr->crExt, chroma10bitSize, EB_N_PTR, EB_ErrorInsufficientResources);
++
++    }
++    else {
++        inputPtr->crExt = 0;
++    }
++
++    if (config->dolbyVisionProfile == 81 && config->dolbyVisionRpuFile) {
++        EB_APP_MALLOC(uint8_t*, inputPtr->dolbyVisionRpu.payload, 1024, EB_N_PTR, EB_ErrorInsufficientResources);
++    }
++
++    return return_error;
++}
++
+diff --git a/Source/Lib/Codec/EbEncHandle.c b/Source/Lib/Codec/EbEncHandle.c
+index 033ff94..0682274 100644
+--- a/Source/Lib/Codec/EbEncHandle.c
++++ b/Source/Lib/Codec/EbEncHandle.c
+@@ -3795,7 +3795,7 @@ static EB_ERRORTYPE CopyFrameBuffer(
+         EB_U16                           sourceCbStride   = (EB_U16)(inputPtr->cbStride);
+ 
+         //EB_U16                           lumaHeight  = inputPicturePtr->maxHeight;
+-
++        inputPicturePtr->unref_tag = inputPtr->unref_tag;
+         if (lumaWidth > lumaStride || lumaWidth > sourceLumaStride || chromaWidth > chromaStride) {
+             return EB_ErrorBadParameter;
+         }
+@@ -3976,13 +3976,40 @@ static EB_ERRORTYPE  CopyInputBuffer(
+     dst->sliceType  = src->sliceType;
+ 
+     // Copy the picture buffer
+-    if(src->pBuffer != NULL)
+-        return_error = CopyFrameBuffer(sequenceControlSet, dst->pBuffer, src->pBuffer);
+-
+-    if (return_error != EB_ErrorNone)
+-        return return_error;
+-
+-
++    if(src->pBuffer != NULL){
++//        Padding_test define in this file
++        if(src->padding_test){
++            EB_H265_ENC_CONFIGURATION   *config = &sequenceControlSet->staticConfig;
++            EbPictureBufferDesc_t           *inputPicturePtr = (EbPictureBufferDesc_t*)dst->pBuffer;
++            EB_H265_ENC_INPUT               *inputPtr = (EB_H265_ENC_INPUT*)src->pBuffer;
++            EB_BOOL                          is16BitInput = (EB_BOOL)(config->encoderBitDepth > EB_8BIT);
++            EB_U16                           colorFormat = (EB_U16)(config->encoderColorFormat);
++            EB_U16                           subWidthCMinus1 = (colorFormat == EB_YUV444 ? 1 : 2) - 1;
++            EB_U16                           subHeightCMinus1 = (colorFormat >= EB_YUV422 ? 1 : 2) - 1;
++            if(!is16BitInput){
++                inputPicturePtr->bufferY = (EB_BYTE)inputPtr->luma;
++                inputPicturePtr->bufferCb = (EB_BYTE)inputPtr->cb;
++                inputPicturePtr->bufferCr = (EB_BYTE)inputPtr->cr;
++                inputPicturePtr->unref_tag = inputPtr->unref_tag;
++                // printf("\ncxh ---> copying frame, ffmpegptr = %ld, Hevcptr = %ld\n ", inputPtr, inputPicturePtr);
++            }else{
++                //TODO 10bits or other situation
++                printf("\n 10bits is not avalible for this version!\n");
++                //return return_error = EB_ErrorUndefined;
++            }
++            if (inputPtr->dolbyVisionRpu.payloadSize) {
++                inputPicturePtr->dolbyVisionRpu.payloadSize = inputPtr->dolbyVisionRpu.payloadSize;
++                EB_MALLOC(EB_U8*, inputPicturePtr->dolbyVisionRpu.payload, inputPtr->dolbyVisionRpu.payloadSize, EB_N_PTR);
++                EB_MEMCPY(inputPicturePtr->dolbyVisionRpu.payload, inputPtr->dolbyVisionRpu.payload, inputPtr->dolbyVisionRpu.payloadSize);
++            }
++            else {
++                inputPicturePtr->dolbyVisionRpu.payloadSize = 0;
++                inputPicturePtr->dolbyVisionRpu.payload = NULL;
++            }
++        }else{
++            return_error = CopyFrameBuffer(sequenceControlSet, dst->pBuffer, src->pBuffer);
++        }
++    }
+     // Copy User SEI
+     if (src->pBuffer != NULL)
+         CopyUserSei(sequenceControlSet, dst, src);
+diff --git a/Source/Lib/Codec/EbPictureBufferDesc.h b/Source/Lib/Codec/EbPictureBufferDesc.h
+index 94674da..9875e6a 100644
+--- a/Source/Lib/Codec/EbPictureBufferDesc.h
++++ b/Source/Lib/Codec/EbPictureBufferDesc.h
+@@ -60,7 +60,8 @@ typedef struct EbPictureBufferDesc_s
+ 
+ 	EB_SEI_MESSAGE    dolbyVisionRpu;
+ 	EB_SEI_MESSAGE    userSeiMsg;
+-
++	int *unref_tag;
++	
+ } EbPictureBufferDesc_t;
+ 
+ /************************************
+diff --git a/Source/Lib/Codec/EbRateControlProcess.c b/Source/Lib/Codec/EbRateControlProcess.c
+index 6d0f89f..7bf6f36 100644
+--- a/Source/Lib/Codec/EbRateControlProcess.c
++++ b/Source/Lib/Codec/EbRateControlProcess.c
+@@ -2859,6 +2859,10 @@ void* RateControlKernel(void *inputPtr)
+ 			EbReleaseObject(parentPictureControlSetPtr->sequenceControlSetWrapperPtr);
+             // Release the input buffer
+             EbReleaseObject(parentPictureControlSetPtr->ebInputWrapperPtr);
++            EB_BUFFERHEADERTYPE* f = (EB_BUFFERHEADERTYPE*) parentPictureControlSetPtr->ebInputWrapperPtr->objectPtr;
++            EbPictureBufferDesc_t *tt = (EbPictureBufferDesc_t *) f->pBuffer;
++            *(tt->unref_tag) = 2;
++ 
+             // Release the ParentPictureControlSet
+ 			EbReleaseObject(rateControlTasksPtr->pictureControlSetWrapperPtr);
+ 
+diff --git a/Source/Lib/Codec/EbSystemResourceManager.c b/Source/Lib/Codec/EbSystemResourceManager.c
+index 4f39c69..e3fec43 100644
+--- a/Source/Lib/Codec/EbSystemResourceManager.c
++++ b/Source/Lib/Codec/EbSystemResourceManager.c
+@@ -4,7 +4,7 @@
+ */
+ 
+ #include <stdlib.h>
+-
++#include "EbPictureBufferDesc.h"
+ #include "EbSystemResourceManager.h"
+ 
+ /**************************************
+-- 
+2.17.1
+

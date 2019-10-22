@@ -1,0 +1,28 @@
+# svt-hevc ffmpeg plugin installation
+
+These instructions build a version of ffmpeg with the SVT-HEVC plugin.  The steps differ depending
+on whether using a Linux build machine.
+
+For Linux:
+1. Build and install SVT-HEVC 
+- git clone https://github.com/OpenVisualCloud/SVT-HEVC
+- git apply 0001-add-input-yuv-file-no-memory-copy-test-tag-and-build.patch
+- cd SVT-HEVC/Build/linux
+- ./build.sh debug|release
+- cd debug|release
+- make install
+- export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/local/lib
+- export PKG_CONFIG_PATH=${PKG_CONFIG_PATH}:/usr/local/lib/pkgconfig
+
+2. Install FFmpeg with SVT-HEVC FFmpeg plugin
+- git clone https://github.com/FFmpeg/FFmpeg ffmpeg
+- cd ffmpeg
+- git checkout release/4.2
+- git apply 0001-add-four-pipeline-demo-and-add-no-memory-copy-for-svt.patch
+- git am 0001-lavc-svt_hevc-add-libsvt-hevc-encoder-wrapper.patch
+- ./configure --enable-libsvthevc
+- make -j $(nproc)
+
+3. Verify that ffmpeg can encode media files using the SVT-HEVC plug-in
+- ./multi_transcoding_1toN_g -i input.mp4(8k) -nb_outputs 1 -c:v libsvt_hevc -w 4096 -h 2160 -vf scale=4096:2160,pad=4232:2296:68:68:black -rc 1 -b:v 13M -g 60 -tune 1 -preset 6 -o mo1.mp4
+- ./multi_transcoding_1toN_g -i input.mp4 -nb_outputs 4 -c:v libsvt_hevc -w 4096 -h 2160 -vf scale=4096:2160,pad=4232:2296:68:68:black -rc 1 -b:v 13M -g 60 -tune 1 -preset 6 -o mo1.mp4 -c:v libsvt_hevc -w 1920 -h 1080 -vf scale=1920:1080,pad=2056:1216:68:68:black -rc 1 -b:v 4.5M -g 60 -tune 1 -preset 6 -o mo2.mp4 -c:v libsvt_hevc -w 1280 -h 720 -vf scale=1280:720,pad=1416:856:68:68:black -rc 1 -b:v 2M -g 60 -tune 1 -preset 6 -o mo3.mp4 -c:v libsvt_hevc -w 480 -h 360 -vf scale=480:360,pad=616:496:68:68:black -rc 1 -b:v 0.5M -g 60 -tune 1 -preset 6 -o mo4.mp4
