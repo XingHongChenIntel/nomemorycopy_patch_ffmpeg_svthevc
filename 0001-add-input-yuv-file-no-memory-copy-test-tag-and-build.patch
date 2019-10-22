@@ -367,7 +367,7 @@ index 033ff94..0682274 100644
 -
 +    if(src->pBuffer != NULL){
 +//        Padding_test define in this file
-+        if(src->padding_test){
++        if(src->pBuffer){
 +            EB_H265_ENC_CONFIGURATION   *config = &sequenceControlSet->staticConfig;
 +            EbPictureBufferDesc_t           *inputPicturePtr = (EbPictureBufferDesc_t*)dst->pBuffer;
 +            EB_H265_ENC_INPUT               *inputPtr = (EB_H265_ENC_INPUT*)src->pBuffer;
